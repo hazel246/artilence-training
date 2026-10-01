@@ -1,0 +1,67 @@
+import time
+import uuid
+
+import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from .env
+
+MODEL = "claude-sonnet-5-5"
+
+# Unique per run, so each run starts with a real cache miss
+RUN_ID = uuid.uuid4().hex
+
+# Long system prompt (must exceed the model's minimum cacheable length)
+LONG_SYSTEM_PROMPT = (
+    f"Session {RUN_ID}.\n"
+    "You are an expert AI enterprise compliance officer.\n"
+    + ("Here is a detailed regulatory compliance framework policy instruction. " * 800)
+)
+
+
+def ask(question: str):
+    start = time.time()
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=100,
+        system=[
+            {
+                "type": "text",
+                "text": LONG_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},  # cache everything up to here
+            }
+        ],
+        messages=[{"role": "user", "content": question}],
+    )
+    return response, round(time.time() - start, 2)
+
+
+def report(label: str, response, elapsed: float):
+    usage = response.usage
+    created = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    print(f"{label} Time Taken: {elapsed} seconds")
+    print(f"  Uncached input tokens: {usage.input_tokens}")
+    print(f"  Cache creation tokens: {created}")
+    print(f"  Cache read tokens:     {read}")
+    return created, read
+
+
+print("Step 1: First call (cache miss, writing to cache)...")
+response_1, time_1 = ask("What are the core duties of a compliance officer based on the framework?")
+created_1, read_1 = report("Call 1", response_1, time_1)
+
+if created_1 == 0 and read_1 == 0:
+    print("\nWARNING: nothing was cached. The prompt is probably below the model's "
+          "minimum cacheable length. Increase the * 800 multiplier and rerun.")
+
+print("\n--------------------------------------------------\n")
+
+print("Step 2: Second call (cache hit, reading from cache)...")
+response_2, time_2 = ask("Summarize the key compliance policy rules.")
+created_2, read_2 = report("Call 2", response_2, time_2)
+
+speedup = round(((time_1 - time_2) / time_1) * 100, 1) if time_1 > 0 else 0
+print(f"\nLatency change on Call 2: {speedup}% faster (negative means slower)")
